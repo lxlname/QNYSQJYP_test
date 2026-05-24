@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>语音输入法实训测试</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; background-color: #f4f4f9; padding: 50px; }
+        #chat-box { width: 600px; height: 300px; border: 1px solid #ddd; background: white; padding: 20px; overflow-y: auto; border-radius: 12px; font-size: 18px; line-height: 1.6; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .btn { margin-top: 30px; padding: 15px 50px; font-size: 20px; color: white; background-color: #007bff; border: none; border-radius: 50px; cursor: pointer; transition: all 0.3s ease; user-select: none; box-shadow: 0 4px 6px rgba(0,123,255,0.3); }
+        .btn:active { transform: scale(0.95); }
+        .btn.recording { background-color: #dc3545; animation: pulse 1.5s infinite; box-shadow: 0 4px 6px rgba(220,53,69,0.3); }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(220, 53, 69, 0); } 100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); } }
+        #status { margin-top: 15px; color: #666; font-size: 14px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h2>🎙️ 智能语音输入法</h2>
+    <div id="chat-box"></div>
+    <button id="record-btn" class="btn">按住说话</button>
+    <div id="status">连接中...</div>
+
+    <script>
+        let socket;
+        let audioContext;
+        let mediaStream;
+        let processor;
+        
+        const recordBtn = document.getElementById('record-btn');
+        const chatBox = document.getElementById('chat-box');
+        const statusDiv = document.getElementById('status');
+
+        // 1. 初始化 WebSocket (先直连 Python 引擎)
+        function initWebSocket() {
+            socket = new WebSocket("ws://127.0.0.1:8080/voice/stream");
+            socket.onopen = () => statusDiv.innerText = "🟢 AI 引擎已连接，可以说话了";
+            socket.onclose = () => statusDiv.innerText = "🔴 连接已断开，请刷新页面";
+            socket.onerror = () => statusDiv.innerText = "⚠️ 连接出错";
+            socket.onmessage = (e) => {
+                chatBox.innerHTML += e.data;
+                chatBox.scrollTop = chatBox.scrollHeight;
+            };
+        }
+
+        // 2. 采集音频并发送
+        async function startRecording() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) initWebSocket();
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                processor.onaudioprocess = function(e) {
+                    if (socket.readyState === WebSocket.OPEN) {
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        const pcm16 = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {
+                            let s = Math.max(-1, Math.min(1, inputData[i]));
+                            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+                        socket.send(pcm16.buffer); // 发送 PCM 数据流
+                    }
+                };
+                
+                recordBtn.classList.add('recording');
+                recordBtn.innerText = "正在倾听 (松开停止)...";
+            } catch (err) {
+                alert("无法访问麦克风，请在浏览器地址栏允许麦克风权限！");
+            }
+        }
+
+        // 3. 停止录音
+        function stopRecording() {
+            if (processor) { processor.disconnect(); processor = null; }
+            if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); }
+            if (audioContext) { audioContext.close(); }
+            recordBtn.classList.remove('recording');
+            recordBtn.innerText = "按住说话";
+            chatBox.innerHTML += "<br><br>"; // 换行
+        }
+
+        // 绑定按压事件
+        recordBtn.addEventListener('mousedown', startRecording);
+        recordBtn.addEventListener('mouseup', stopRecording);
+        recordBtn.addEventListener('mouseleave', stopRecording);
+
+        window.onload = initWebSocket;
+    </script>
+</body>
+</html>
