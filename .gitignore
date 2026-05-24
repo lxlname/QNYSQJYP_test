@@ -1,0 +1,24 @@
+# ========== Java / Spring Boot 忽略项 ==========
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+.classpath
+.project
+.settings
+.idea
+*.iml
+
+# ========== Python / AI 引擎忽略项 ==========
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+env/
+.venv/
+voice-env/
+
+# ========== 操作系统产生的垃圾文件 ==========
+.DS_Store
+Thumbs.db
