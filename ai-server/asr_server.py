@@ -1,13 +1,18 @@
 import asyncio
 import os
+
 import pyautogui
 import pyperclip
+
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from funasr import AutoModel
 from openai import OpenAI
 
 app = FastAPI()
+CHUNK_SIZE = [0, 10, 5]
+USER_DYNAMIC_HOTWORDS = ""
+
 
 # --- 核心配置 ---
 CHUNK_SIZE = [0, 10, 5]
@@ -30,19 +35,23 @@ SCENES = {
 
 client = OpenAI(
     api_key="sk-d0927a42f9be43218576ac3241d9f5f6", 
+
     base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com"),
 )
 
 print("⏳ 正在加载 Paraformer 流式语音识别模型...")
+
 model = AutoModel(
     model="iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
 )
 print("✅ 模型加载完成！AI 引擎已就绪...")
 
+
 def _extract_text(rec_result) -> str:
     if rec_result and len(rec_result) > 0 and "text" in rec_result[0]:
         return rec_result[0]["text"].strip()
     return ""
+
 
 # LLM 流式输出与键盘映射逻辑
 async def _stream_llm_and_type(websocket: WebSocket, full_text: str, scene: str) -> None:
@@ -65,10 +74,12 @@ async def _stream_llm_and_type(websocket: WebSocket, full_text: str, scene: str)
         
         final_corrected_text = ""
         # 3. 逐字接收并推给前端
+
         for chunk in response:
             if chunk.choices[0].delta.content is not None:
                 char = chunk.choices[0].delta.content
                 final_corrected_text += char
+
                 await websocket.send_text(f"[LLM_CHUNK]{char}")
                 await asyncio.sleep(0.01) # 微小延迟，让前端动画更平滑
         
@@ -83,9 +94,12 @@ async def _stream_llm_and_type(websocket: WebSocket, full_text: str, scene: str)
         print(f"⚠️ LLM 纠错失败: {e}")
         await websocket.send_text(f"[LLM_CHUNK]纠错失败，原文本: {full_text}")
 
+
 @app.websocket("/asr")
 async def asr_endpoint(websocket: WebSocket):
+    global USER_DYNAMIC_HOTWORDS
     await websocket.accept()
+
     print("📞 新的 WebSocket 客户端已连接")
 
     try:
@@ -106,27 +120,34 @@ async def asr_endpoint(websocket: WebSocket):
                     break
 
                 current_hotword = SCENES.get(current_scene, SCENES["academic"])["hotword"]
+
                 rec_result = model.generate(
                     input=data,
                     cache=param_dict["cache"],
                     is_final=False,
                     chunk_size=CHUNK_SIZE,
+
                     hotword=current_hotword,
                 )
+
 
                 text = _extract_text(rec_result)
                 if text:
                     transcript_parts.append(text)
                     await websocket.send_text(text)
 
+
             # 🛑 用户说完了，进行收尾和 LLM 流式输出
             current_hotword = SCENES.get(current_scene, SCENES["academic"])["hotword"]
+
             rec_result = model.generate(
                 input=b"",
                 cache=param_dict["cache"],
                 is_final=True,
                 chunk_size=CHUNK_SIZE,
+
                 hotword=current_hotword,
+
             )
             final_text = _extract_text(rec_result)
             if final_text:
@@ -134,6 +155,7 @@ async def asr_endpoint(websocket: WebSocket):
 
             full_text = "".join(transcript_parts)
             if full_text.strip():
+
                 # 触发大模型流式打字机效果
                 await _stream_llm_and_type(websocket, full_text, current_scene)
             
@@ -144,3 +166,4 @@ async def asr_endpoint(websocket: WebSocket):
         print("🔌 客户端网页已关闭，连接断开")
     except Exception as e:
         print(f"❌ 发生异常: {e}")
+
