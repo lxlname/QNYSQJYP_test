@@ -1,4 +1,5 @@
 bilibili视频地址：https://www.bilibili.com/video/BV1sCGd6eETT/?vd_source=c2d5118f96e671b06ffa90b85693baee
+组员分工：李晓龙负责代码编写，刘发桢负责视频录制
 
 
 
