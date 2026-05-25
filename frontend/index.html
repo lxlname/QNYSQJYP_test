@@ -2,92 +2,184 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>语音输入法实训测试</title>
+    <title>神级语音输入法 V3</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; background-color: #f4f4f9; padding: 50px; }
-        #chat-box { width: 600px; height: 300px; border: 1px solid #ddd; background: white; padding: 20px; overflow-y: auto; border-radius: 12px; font-size: 18px; line-height: 1.6; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
-        .btn { margin-top: 30px; padding: 15px 50px; font-size: 20px; color: white; background-color: #007bff; border: none; border-radius: 50px; cursor: pointer; transition: all 0.3s ease; user-select: none; box-shadow: 0 4px 6px rgba(0,123,255,0.3); }
-        .btn:active { transform: scale(0.95); }
-        .btn.recording { background-color: #dc3545; animation: pulse 1.5s infinite; box-shadow: 0 4px 6px rgba(220,53,69,0.3); }
-        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(220, 53, 69, 0); } 100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); } }
-        #status { margin-top: 15px; color: #666; font-size: 14px; font-weight: bold; }
+        body { font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; background-color: #f0f2f5; padding: 40px; }
+        #chat-box { width: 600px; height: 200px; border: none; background: white; padding: 20px; overflow-y: auto; border-radius: 16px; font-size: 20px; line-height: 1.6; box-shadow: 0 10px 30px rgba(0,0,0,0.08); transition: all 0.3s; }
+        #chat-box.typing { background: #f8fbff; border: 2px solid #007bff; }
+        
+        /* 场景选择器 UI */
+        .scene-selector { margin-top: 25px; display: flex; gap: 15px; }
+        .scene-label { padding: 10px 20px; background: #fff; border-radius: 30px; cursor: pointer; font-size: 14px; font-weight: bold; color: #666; box-shadow: 0 2px 8px rgba(0,0,0,0.05); transition: 0.2s; border: 2px solid transparent; }
+        .scene-label:hover { transform: translateY(-2px); }
+        input[type="radio"] { display: none; }
+        input[type="radio"]:checked + .scene-label { background: #007bff; color: white; border-color: #0056b3; }
+
+        #waveform-wrap { width: 600px; margin-top: 25px; border-radius: 16px; overflow: hidden; background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%); box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1); }
+        #waveform-canvas { display: block; width: 100%; height: 60px; }
+        
+        .btn { margin-top: 25px; padding: 18px 60px; font-size: 22px; color: white; background-color: #007bff; border: none; border-radius: 50px; cursor: pointer; user-select: none; box-shadow: 0 6px 15px rgba(0,123,255,0.4); transition: 0.2s; font-weight: bold; }
+        .btn.recording { background-color: #ff4757; animation: pulse 1.2s infinite; box-shadow: 0 6px 15px rgba(255,71,87,0.4); }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+        
+        #status { margin-top: 15px; color: #666; font-size: 14px; }
     </style>
 </head>
 <body>
-    <h2>🎙️ 智能语音输入法</h2>
+    <h2>🚀 神级语音输入法</h2>
+    
     <div id="chat-box"></div>
-    <button id="record-btn" class="btn">按住说话</button>
+    
+    <div class="scene-selector">
+        <input type="radio" id="scene-academic" name="scene" value="academic" checked>
+        <label for="scene-academic" class="scene-label">🎓 学术模式</label>
+        
+        <input type="radio" id="scene-coding" name="scene" value="coding">
+        <label for="scene-coding" class="scene-label">💻 编程模式</label>
+        
+        <input type="radio" id="scene-daily" name="scene" value="daily">
+        <label for="scene-daily" class="scene-label">☕ 日常模式</label>
+    </div>
+
+    <div id="waveform-wrap">
+        <canvas id="waveform-canvas"></canvas>
+    </div>
+    <button id="record-btn" class="btn">按住说话 (Space)</button>
     <div id="status">连接中...</div>
 
     <script>
-        let socket;
-        let audioContext;
-        let mediaStream;
-        let processor;
-        
+        let socket, audioContext, mediaStream, processor, analyser, animationId;
+        let isRecording = false;
+
         const recordBtn = document.getElementById('record-btn');
         const chatBox = document.getElementById('chat-box');
-        const statusDiv = document.getElementById('status');
+        const waveformCanvas = document.getElementById('waveform-canvas');
 
-        // 1. 初始化 WebSocket (先直连 Python 引擎)
+        function resizeCanvas() {
+            const wrap = document.getElementById('waveform-wrap');
+            waveformCanvas.width = wrap.clientWidth;
+            waveformCanvas.height = 60;
+        }
+
+        function drawWaveform() {
+            if (!analyser || !isRecording) return;
+            animationId = requestAnimationFrame(drawWaveform);
+            const dataArray = new Uint8Array(analyser.fftSize);
+            analyser.getByteTimeDomainData(dataArray);
+
+            const ctx = waveformCanvas.getContext('2d');
+            ctx.fillStyle = 'rgba(26, 26, 46, 0.2)';
+            ctx.fillRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#00d4ff';
+            ctx.beginPath();
+            const sliceWidth = waveformCanvas.width / analyser.fftSize;
+            let x = 0;
+            for (let i = 0; i < analyser.fftSize; i++) {
+                const y = (dataArray[i] / 128.0) * (waveformCanvas.height / 2);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+                x += sliceWidth;
+            }
+            ctx.stroke();
+        }
+
         function initWebSocket() {
             socket = new WebSocket("ws://127.0.0.1:8080/voice/stream");
-            socket.onopen = () => statusDiv.innerText = "🟢 AI 引擎已连接，可以说话了";
-            socket.onclose = () => statusDiv.innerText = "🔴 连接已断开，请刷新页面";
-            socket.onerror = () => statusDiv.innerText = "⚠️ 连接出错";
+            socket.onopen = () => document.getElementById('status').innerText = "🟢 AI 引擎就绪";
             socket.onmessage = (e) => {
+                // 收到 LLM 开始信号，清空粗糙识别结果，准备打字机动画
+                if (e.data === "[LLM_START]") {
+                    chatBox.innerHTML = "";
+                    chatBox.classList.add('typing');
+                    return;
+                }
+                // 收到流式块，逐字拼接
+                if (e.data.startsWith("[LLM_CHUNK]")) {
+                    chatBox.innerHTML += e.data.replace("[LLM_CHUNK]", "");
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                    return;
+                }
+                // 普通流式语音识别结果
                 chatBox.innerHTML += e.data;
                 chatBox.scrollTop = chatBox.scrollHeight;
             };
         }
 
-        // 2. 采集音频并发送
         async function startRecording() {
+            if (isRecording) return;
             if (!socket || socket.readyState !== WebSocket.OPEN) initWebSocket();
+            chatBox.classList.remove('typing');
+            
             try {
                 mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
                 const source = audioContext.createMediaStreamSource(mediaStream);
                 
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 1024;
                 processor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                source.connect(analyser);
                 source.connect(processor);
                 processor.connect(audioContext.destination);
 
                 processor.onaudioprocess = function(e) {
-                    if (socket.readyState === WebSocket.OPEN) {
-                        const inputData = e.inputBuffer.getChannelData(0);
-                        const pcm16 = new Int16Array(inputData.length);
-                        for (let i = 0; i < inputData.length; i++) {
-                            let s = Math.max(-1, Math.min(1, inputData[i]));
-                            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-                        }
-                        socket.send(pcm16.buffer); // 发送 PCM 数据流
+                    if (socket.readyState !== WebSocket.OPEN) return;
+                    
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    // 【终极优化 2】：前端 VAD 静音剔除，榨干性能！
+                    let sumSquare = 0;
+                    for (let i = 0; i < inputData.length; i++) sumSquare += inputData[i] * inputData[i];
+                    const rms = Math.sqrt(sumSquare / inputData.length);
+                    
+                    if (rms < 0.005) return; // 音量过低（纯静音），直接抛弃包，不发给后端！
+
+                    const pcm16 = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        let s = Math.max(-1, Math.min(1, inputData[i]));
+                        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
+                    socket.send(pcm16.buffer);
                 };
-                
+
+                isRecording = true;
                 recordBtn.classList.add('recording');
-                recordBtn.innerText = "正在倾听 (松开停止)...";
-            } catch (err) {
-                alert("无法访问麦克风，请在浏览器地址栏允许麦克风权限！");
-            }
+                recordBtn.innerText = "正在倾听 (松开停止)";
+                drawWaveform();
+            } catch (err) { alert("麦克风权限被拒绝！"); }
         }
 
-        // 3. 停止录音
         function stopRecording() {
+            if (!isRecording) return;
+            isRecording = false;
+            
+            // 获取当前选中的场景，发送特定暗号给 Python
+            const activeScene = document.querySelector('input[name="scene"]:checked').value;
+            if (socket.readyState === WebSocket.OPEN) {
+                // 发送形如 "EOF_academic" 的结束标志
+                socket.send(new TextEncoder().encode("EOF_" + activeScene)); 
+            }
+            
             if (processor) { processor.disconnect(); processor = null; }
+            if (analyser) { analyser.disconnect(); analyser = null; }
             if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); }
-            if (audioContext) { audioContext.close(); }
+            if (audioContext) { audioContext.close(); audioContext = null; }
+            
             recordBtn.classList.remove('recording');
-            recordBtn.innerText = "按住说话";
-            chatBox.innerHTML += "<br><br>"; // 换行
+            recordBtn.innerText = "按住说话 (Space)";
+            chatBox.innerHTML += "<br>"; 
+            
+            // 停止录音后，延时移除高亮框
+            setTimeout(() => chatBox.classList.remove('typing'), 3000);
         }
 
-        // 绑定按压事件
         recordBtn.addEventListener('mousedown', startRecording);
-        recordBtn.addEventListener('mouseup', stopRecording);
-        recordBtn.addEventListener('mouseleave', stopRecording);
+        window.addEventListener('mouseup', stopRecording); // 扩大监听范围
 
-        window.onload = initWebSocket;
+        document.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat && e.target.tagName !== 'INPUT') { e.preventDefault(); startRecording(); }});
+        document.addEventListener('keyup', (e) => { if (e.code === 'Space' && e.target.tagName !== 'INPUT') { e.preventDefault(); stopRecording(); }});
+        window.onload = () => { resizeCanvas(); initWebSocket(); };
     </script>
 </body>
 </html>
