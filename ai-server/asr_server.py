@@ -1,14 +1,10 @@
 import asyncio
 import os
-import json
-import time
+
 import pyautogui
-pyautogui.FAILSAFE = False  
 import pyperclip
-import jieba.analyse
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from funasr import AutoModel
 from openai import OpenAI
@@ -17,215 +13,141 @@ app = FastAPI()
 CHUNK_SIZE = [0, 10, 5]
 USER_DYNAMIC_HOTWORDS = ""
 
-# ==========================================
-# 🌟 领域知识库 (取代原先写死的 SCENES)
-# ==========================================
-LEXICONS = {
-    "academic": "水下图像质量评价 FSCR-Net UIQA 注意力机制 卷积神经网络 评价模型",
-    "coding": "for循环 while 递归 异常处理 Bug 接口 数据库 部署 编译器",
-    "daily": "你好 吃饭 电影 散步 谢谢 没问题 聊天"
+
+# --- 核心配置 ---
+CHUNK_SIZE = [0, 10, 5]
+
+# 多场景配置字典 (包含热词和专属 Prompt)
+SCENES = {
+    "academic": {
+        "hotword": "FSCR-Net UIQA 注意力机制 对比学习",
+        "prompt": "你是一个学术语音输入法。请对以下无标点文本进行语义纠错并添加正确标点。特别注意学术词汇（如 FSCR-Net, UIQA等）拼写必须正确。直接输出最终文本，不带任何解释：\n\n{text}"
+    },
+    "coding": {
+        "hotword": "for循环 while 递归 报错 异常处理 Bug",
+        "prompt": "你是一个程序员语音输入法。请对以下无标点文本进行纠错并添加标点。特别注意将中文编程术语转换为正确的英文单词或符号（如将‘负循环’改为‘for循环’，‘布尔’改为‘boolean’）。直接输出最终文本，不带任何解释：\n\n{text}"
+    },
+    "daily": {
+        "hotword": "好的 收到 没问题 哈哈 晚安",
+        "prompt": "你是一个高情商的日常聊天输入法。请对以下无标点文本进行纠错，并加上恰当的标点符号和语气词（如果适合的话）。使其读起来自然、得体。直接输出最终文本，不带任何解释：\n\n{text}"
+    }
 }
 
-def get_smart_hotwords(text: str, current_scene: str) -> str:
-    """语义路由引擎：如果用户说了特定领域词，自动提升该领域热词权重"""
-    text = text.lower()
-    # 匹配优先级：学术 > 编程 > 默认日常
-    if any(k in text for k in ["评价", "模型", "论文", "网络", "机制"]):
-        return LEXICONS["academic"]
-    if any(k in text for k in ["代码", "循环", "函数", "数据库", "bug"]):
-        return LEXICONS["coding"]
-    return LEXICONS.get(current_scene, LEXICONS["daily"])
-
-# ==========================================
-# 🌟 企业级内存向量缓存系统 (Vector Semantic Cache)
-# ==========================================
-class VectorCache:
-    def __init__(self):
-        self.records = {} # 存储 query -> corrected_text
-
-    def add(self, query: str, corrected: str):
-        self.records[query] = corrected
-
-    def search(self, query: str, threshold=0.75):
-        if not self.records:
-            return None, 0.0
-        
-        corpus = list(self.records.keys())
-        # 使用字符级 N-gram 向量化，完美兼容中文错别字和冗余语气词
-        vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(1, 3))
-        tfidf_matrix = vectorizer.fit_transform(corpus)
-        query_vec = vectorizer.transform([query])
-        
-        # 计算余弦相似度
-        sims = cosine_similarity(query_vec, tfidf_matrix)[0]
-        best_idx = sims.argmax()
-        
-        if sims[best_idx] >= threshold:
-            return self.records[corpus[best_idx]], sims[best_idx]
-        return None, 0.0
-
-SEMANTIC_CACHE = VectorCache()
-
-# ==========================================
-# 🌟 大模型 Prompt 架构 (分离 System 与 User)
-# ==========================================
-SYSTEM_PROMPT = """你是一个专业的底层语音转写引擎。
-你的唯一任务是对用户的语音识别文本进行纠错并添加标点。
-绝对规则：
-1. 只输出最终修正好的文本，绝不能包含任何解释、注脚或“好的”、“如下”等废话。
-2. 下方提供的【RAG专属词库】仅在你认为发音高度相似时才作为纠错参考，不要生搬硬套。"""
-
 client = OpenAI(
-    api_key="sk-d0927a42f9be43218576ac3241d9f5f6",
+    api_key="sk-d0927a42f9be43218576ac3241d9f5f6", 
+
     base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com"),
 )
 
 print("⏳ 正在加载 Paraformer 流式语音识别模型...")
-model = AutoModel(model="iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online")
-print("✅ 模型加载完成！智能路由 AI 引擎已就绪...")
+
+model = AutoModel(
+    model="iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
+)
+print("✅ 模型加载完成！AI 引擎已就绪...")
+
 
 def _extract_text(rec_result) -> str:
     if rec_result and len(rec_result) > 0 and "text" in rec_result[0]:
         return rec_result[0]["text"].strip()
     return ""
 
-async def _stream_llm_and_type(websocket: WebSocket, full_text: str, scene: str, audio_duration: float, start_time: float) -> None:
+
+# LLM 流式输出与键盘映射逻辑
+async def _stream_llm_and_type(websocket: WebSocket, full_text: str, scene: str) -> None:
     if not full_text.strip():
         return
 
-    print(f"\n🗣️ 收到原始语音识别结果: [{full_text}]")
-
-    # 1. 尝试触发向量语义缓存
-    cached_text, sim_score = SEMANTIC_CACHE.search(full_text, threshold=0.80)
-    if cached_text:
-        print(f"⚡ 向量缓存命中! 相似度 {sim_score*100:.1f}%\n  直接输出: {cached_text}")
-        await websocket.send_text("[LLM_START]")
-        await websocket.send_text(f"[LLM_CHUNK]{cached_text}")
-        _send_metrics(websocket, audio_duration, start_time, len(cached_text), hit_cache=True)
-        _type_text(cached_text)
-        return
-
-    # 2. 缓存未命中，构造完美的 LLM 请求
-    print("🤖 缓存未命中，正在呼叫大模型进行精修排版...")
-    await websocket.send_text("[LLM_START]")
+    prompt = SCENES.get(scene, SCENES["daily"])["prompt"]
     
-    # 动态选用最优提示词
-    smart_base = get_smart_hotwords(full_text, scene)
-    rag_context = USER_DYNAMIC_HOTWORDS if USER_DYNAMIC_HOTWORDS else smart_base
-    
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + f"\n【RAG专属词库】：{rag_context}"},
-        {"role": "user", "content": full_text}
-    ]
-
     try:
+        print(f"🤖 正在呼叫大模型 ({scene} 模式) 进行流式精修...")
+        # 1. 发送清屏信号给前端
+        await websocket.send_text("[LLM_START]")
+        
+        # 2. 开启流式请求
         response = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", "deepseek-chat"),
-            messages=messages,
-            stream=True
+            messages=[{"role": "user", "content": prompt.format(text=full_text)}],
+            stream=True # 核心：开启打字机模式
         )
         
         final_corrected_text = ""
-        print("✍️ 大模型流式输出中: ", end="", flush=True)
+        # 3. 逐字接收并推给前端
+
         for chunk in response:
             if chunk.choices[0].delta.content is not None:
                 char = chunk.choices[0].delta.content
                 final_corrected_text += char
-                print(char, end="", flush=True) 
+
                 await websocket.send_text(f"[LLM_CHUNK]{char}")
-                await asyncio.sleep(0.01)
-        print() 
+                await asyncio.sleep(0.01) # 微小延迟，让前端动画更平滑
         
-        # 将原始结果与大模型修正结果存入向量缓存
-        SEMANTIC_CACHE.add(full_text, final_corrected_text)
-        
-        _send_metrics(websocket, audio_duration, start_time, len(final_corrected_text), hit_cache=False)
-        _type_text(final_corrected_text)
+        # 4. OS 级键盘输入 (终极魔法)
+        if final_corrected_text:
+            print(f"⌨️ 正在模拟键盘输入: {final_corrected_text}")
+            pyperclip.copy(final_corrected_text) # 将文字拷入剪贴板以防中文乱码
+            # 模拟按下 Ctrl + V (如果是 Mac 用户，请把 'ctrl' 改为 'command')
+            pyautogui.hotkey('ctrl', 'v') 
             
     except Exception as e:
-        # 只在后台打印真实报错，绝对不污染前端用户的视线
-        print(f"\n❌ 系统执行异常: {e}")
-        # await websocket.send_text(f"[LLM_CHUNK] (系统开小差了，请重试)")
+        print(f"⚠️ LLM 纠错失败: {e}")
+        await websocket.send_text(f"[LLM_CHUNK]纠错失败，原文本: {full_text}")
 
-def _type_text(text: str):
-    if text:
-        pyperclip.copy(text)
-        pyautogui.hotkey('ctrl', 'v')
-
-def _send_metrics(websocket, audio_duration, start_time, text_len, hit_cache):
-    process_time = time.time() - start_time
-    rtf = process_time / audio_duration if audio_duration > 0 else 0
-    tokens = text_len * 1.5 if not hit_cache else 0
-    metrics = {
-        "type": "metrics",
-        "rtf": round(rtf, 3),
-        "tokens": int(tokens),
-        "cacheHit": "向量命中 (⚡0ms)" if hit_cache else "未命中 (API调用)"
-    }
-    asyncio.create_task(websocket.send_text(f"[METRICS]{json.dumps(metrics)}"))
 
 @app.websocket("/asr")
 async def asr_endpoint(websocket: WebSocket):
     global USER_DYNAMIC_HOTWORDS
     await websocket.accept()
 
-    print("\n🟢 [服务器] -> 客户端握手成功，WebSocket 通道已建立！")
-    
+    print("📞 新的 WebSocket 客户端已连接")
+
     try:
-        while True:
+        # 🌍 核心修复：外层无限循环，保持长连接不断，支持连续多次说话！
+        while True: 
             param_dict = {"cache": dict()}
             transcript_parts: list[str] = []
-            current_scene = "academic"
-            total_audio_bytes = 0
-            start_time = time.time()
+            current_scene = "academic" 
 
+            # 🎶 内层循环：处理用户单次说话的音频流
             while True:
                 data = await websocket.receive_bytes()
 
-                if data.startswith(b"RAG_TEXT:"):
-                    content = data.decode("utf-8")[9:]
-                    keywords = jieba.analyse.extract_tags(content, topK=10)
-                    USER_DYNAMIC_HOTWORDS = " ".join(keywords)
-                    print(f"📚 RAG 热词提取成功: {USER_DYNAMIC_HOTWORDS}")
-                    await websocket.send_text(f"[RAG_DONE]已提取专属词库: {USER_DYNAMIC_HOTWORDS}")
-                    continue
-
+                # 收到前端松开按钮的结束暗号，跳出内层循环
                 if len(data) <= 20 and data.startswith(b"EOF_"):
                     current_scene = data.decode("utf-8").split("_")[1]
+                    print(f"📨 收到结束暗号，当前场景: {current_scene}")
                     break
 
-                total_audio_bytes += len(data)
-                
-                # 🌟 核心修改：动态获取当前识别到的文字串，进行路由
-                current_transcript = "".join(transcript_parts)
-                base_hotword = get_smart_hotwords(current_transcript, current_scene)
-                combined_hotword = f"{base_hotword} {USER_DYNAMIC_HOTWORDS}".strip()
+                current_hotword = SCENES.get(current_scene, SCENES["academic"])["hotword"]
 
                 rec_result = model.generate(
                     input=data,
                     cache=param_dict["cache"],
                     is_final=False,
                     chunk_size=CHUNK_SIZE,
-                    hotword=combined_hotword,
+
+                    hotword=current_hotword,
                 )
+
+
                 text = _extract_text(rec_result)
                 if text:
                     transcript_parts.append(text)
                     await websocket.send_text(text)
 
-            audio_duration = total_audio_bytes / 32000.0
 
-            # 最终收尾识别时，再次进行语义路由
-            current_transcript = "".join(transcript_parts)
-            base_hotword = get_smart_hotwords(current_transcript, current_scene)
-            combined_hotword = f"{base_hotword} {USER_DYNAMIC_HOTWORDS}".strip()
-            
+            # 🛑 用户说完了，进行收尾和 LLM 流式输出
+            current_hotword = SCENES.get(current_scene, SCENES["academic"])["hotword"]
+
             rec_result = model.generate(
                 input=b"",
                 cache=param_dict["cache"],
                 is_final=True,
                 chunk_size=CHUNK_SIZE,
-                hotword=combined_hotword.strip(),
+
+                hotword=current_hotword,
+
             )
             final_text = _extract_text(rec_result)
             if final_text:
@@ -233,9 +155,15 @@ async def asr_endpoint(websocket: WebSocket):
 
             full_text = "".join(transcript_parts)
             if full_text.strip():
-                await _stream_llm_and_type(websocket, full_text, current_scene, audio_duration, start_time)
+
+                # 触发大模型流式打字机效果
+                await _stream_llm_and_type(websocket, full_text, current_scene)
             
             param_dict["cache"].clear()
+            print("🧹 本次识别与输出完毕，引擎待机，等待您下一次说话...\n")
 
     except WebSocketDisconnect:
-        print("🔌 客户端已断开")
+        print("🔌 客户端网页已关闭，连接断开")
+    except Exception as e:
+        print(f"❌ 发生异常: {e}")
+
