@@ -6,28 +6,131 @@
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; background-color: #f4f4f9; padding: 50px; }
         #chat-box { width: 600px; height: 300px; border: 1px solid #ddd; background: white; padding: 20px; overflow-y: auto; border-radius: 12px; font-size: 18px; line-height: 1.6; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
-        .btn { margin-top: 30px; padding: 15px 50px; font-size: 20px; color: white; background-color: #007bff; border: none; border-radius: 50px; cursor: pointer; transition: all 0.3s ease; user-select: none; box-shadow: 0 4px 6px rgba(0,123,255,0.3); }
+        #waveform-wrap { width: 600px; margin-top: 24px; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0, 100, 255, 0.15); background: linear-gradient(180deg, #0a1628 0%, #0d2137 100%); }
+        #waveform-canvas { display: block; width: 100%; height: 80px; }
+        .btn { margin-top: 20px; padding: 15px 50px; font-size: 20px; color: white; background-color: #007bff; border: none; border-radius: 50px; cursor: pointer; transition: all 0.3s ease; user-select: none; box-shadow: 0 4px 6px rgba(0,123,255,0.3); }
         .btn:active { transform: scale(0.95); }
         .btn.recording { background-color: #dc3545; animation: pulse 1.5s infinite; box-shadow: 0 4px 6px rgba(220,53,69,0.3); }
         @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(220, 53, 69, 0); } 100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); } }
         #status { margin-top: 15px; color: #666; font-size: 14px; font-weight: bold; }
+        #hint { margin-top: 8px; color: #999; font-size: 12px; }
+        #toast {
+            position: fixed; top: 24px; left: 50%; transform: translateX(-50%) translateY(-20px);
+            padding: 12px 24px; background: #28a745; color: #fff; border-radius: 8px;
+            font-size: 14px; font-weight: 600; box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
+            opacity: 0; pointer-events: none; transition: opacity 0.3s ease, transform 0.3s ease;
+            z-index: 9999;
+        }
+        #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
     </style>
 </head>
 <body>
     <h2>🎙️ 智能语音输入法</h2>
     <div id="chat-box"></div>
+    <div id="waveform-wrap">
+        <canvas id="waveform-canvas"></canvas>
+    </div>
     <button id="record-btn" class="btn">按住说话</button>
     <div id="status">连接中...</div>
+    <div id="hint">提示：按住按钮或长按空格键说话</div>
+    <div id="toast">已自动复制</div>
 
     <script>
         let socket;
         let audioContext;
         let mediaStream;
         let processor;
-        
+        let analyser;
+        let animationId = null;
+        let isRecording = false;
+
         const recordBtn = document.getElementById('record-btn');
         const chatBox = document.getElementById('chat-box');
         const statusDiv = document.getElementById('status');
+        const waveformCanvas = document.getElementById('waveform-canvas');
+        const toastEl = document.getElementById('toast');
+        let toastTimer = null;
+
+        function resizeCanvas() {
+            const wrap = document.getElementById('waveform-wrap');
+            const dpr = window.devicePixelRatio || 1;
+            waveformCanvas.width = wrap.clientWidth * dpr;
+            waveformCanvas.height = 80 * dpr;
+            waveformCanvas.style.height = '80px';
+            const ctx = waveformCanvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+
+        function drawIdleWaveform() {
+            const ctx = waveformCanvas.getContext('2d');
+            const w = waveformCanvas.width / (window.devicePixelRatio || 1);
+            const h = 80;
+            ctx.fillStyle = '#0a1628';
+            ctx.fillRect(0, 0, w, h);
+            ctx.strokeStyle = 'rgba(0, 212, 255, 0.25)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2);
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+        }
+
+        function startWaveformAnimation() {
+            if (!analyser) return;
+            const ctx = waveformCanvas.getContext('2d');
+            const bufferLength = analyser.fftSize;
+            const dataArray = new Uint8Array(bufferLength);
+
+            function draw() {
+                animationId = requestAnimationFrame(draw);
+                analyser.getByteTimeDomainData(dataArray);
+
+                const w = waveformCanvas.width / (window.devicePixelRatio || 1);
+                const h = 80;
+
+                const gradient = ctx.createLinearGradient(0, 0, 0, h);
+                gradient.addColorStop(0, '#0a1628');
+                gradient.addColorStop(1, '#0d2137');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, w, h);
+
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#00d4ff';
+                ctx.shadowBlur = 12;
+                ctx.shadowColor = '#007bff';
+                ctx.beginPath();
+
+                const sliceWidth = w / bufferLength;
+                let x = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    const v = dataArray[i] / 128.0;
+                    const y = (v * h) / 2;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                    x += sliceWidth;
+                }
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+            }
+            draw();
+        }
+
+        function stopWaveformAnimation() {
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+                animationId = null;
+            }
+            drawIdleWaveform();
+        }
+
+        function showToast(message) {
+            toastEl.textContent = message;
+            toastEl.classList.add('show');
+            if (toastTimer) clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => {
+                toastEl.classList.remove('show');
+            }, 2000);
+        }
 
         // 1. 初始化 WebSocket (先直连 Python 引擎)
         function initWebSocket() {
@@ -38,18 +141,33 @@
             socket.onmessage = (e) => {
                 chatBox.innerHTML += e.data;
                 chatBox.scrollTop = chatBox.scrollHeight;
+
+                if (typeof e.data === 'string' && e.data.startsWith('[大模型精修版]')) {
+                    const corrected = e.data.replace(/^\[大模型精修版\]:\s*/, '').trim();
+                    if (corrected && navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(corrected)
+                            .then(() => showToast('已自动复制'))
+                            .catch((err) => console.warn('剪贴板复制失败:', err));
+                    }
+                }
             };
         }
 
         // 2. 采集音频并发送
         async function startRecording() {
+            if (isRecording) return;
             if (!socket || socket.readyState !== WebSocket.OPEN) initWebSocket();
             try {
                 mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
                 const source = audioContext.createMediaStreamSource(mediaStream);
-                
+
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                analyser.smoothingTimeConstant = 0.8;
+
                 processor = audioContext.createScriptProcessor(4096, 1, 1);
+                source.connect(analyser);
                 source.connect(processor);
                 processor.connect(audioContext.destination);
 
@@ -64,9 +182,11 @@
                         socket.send(pcm16.buffer); // 发送 PCM 数据流
                     }
                 };
-                
+
+                isRecording = true;
                 recordBtn.classList.add('recording');
                 recordBtn.innerText = "正在倾听 (松开停止)...";
+                startWaveformAnimation();
             } catch (err) {
                 alert("无法访问麦克风，请在浏览器地址栏允许麦克风权限！");
             }
@@ -74,9 +194,17 @@
 
         // 3. 停止录音
         function stopRecording() {
+            if (!isRecording) return;
+            isRecording = false;
+            // EOF 标志：通知后端录音结束，触发大模型精修（必须在断开本地音频流之前发送）
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(new Uint8Array([255]).buffer);
+            }
+            stopWaveformAnimation();
             if (processor) { processor.disconnect(); processor = null; }
+            if (analyser) { analyser.disconnect(); analyser = null; }
             if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); }
-            if (audioContext) { audioContext.close(); }
+            if (audioContext) { audioContext.close(); audioContext = null; }
             recordBtn.classList.remove('recording');
             recordBtn.innerText = "按住说话";
             chatBox.innerHTML += "<br><br>"; // 换行
@@ -87,7 +215,30 @@
         recordBtn.addEventListener('mouseup', stopRecording);
         recordBtn.addEventListener('mouseleave', stopRecording);
 
-        window.onload = initWebSocket;
+        // 全局快捷键：长按空格说话
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' && !e.repeat) {
+                e.preventDefault();
+                startRecording();
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            if (e.code === 'Space') {
+                e.preventDefault();
+                stopRecording();
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            resizeCanvas();
+            if (!isRecording) drawIdleWaveform();
+        });
+
+        window.onload = () => {
+            resizeCanvas();
+            drawIdleWaveform();
+            initWebSocket();
+        };
     </script>
 </body>
 </html>
